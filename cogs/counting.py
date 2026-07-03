@@ -70,10 +70,32 @@ class Counting(commands.Cog):
             )
             """
         )
+        await self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vibe_counting_warnings (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                guild_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY unique_warning (guild_id, user_id)
+            )
+            """
+        )
 
     async def _get_game(self, guild_id: int) -> dict | None:
         return await self.db.fetchone(
             "SELECT * FROM vibe_counting WHERE guild_id = %s", (guild_id,)
+        )
+
+    async def _reset_count(self, guild_id: int) -> None:
+        """Reset the count to zero and clear all double-count warnings."""
+        await self.db.execute(
+            "UPDATE vibe_counting SET current_count = 0, last_user_id = NULL "
+            "WHERE guild_id = %s",
+            (guild_id,),
+        )
+        await self.db.execute(
+            "DELETE FROM vibe_counting_warnings WHERE guild_id = %s", (guild_id,)
         )
 
     async def _set_mode(self, ctx: commands.Context, mode: str) -> None:
@@ -127,9 +149,9 @@ class Counting(commands.Cog):
             )
             return
 
+        await self._reset_count(ctx.guild.id)
         await self.db.execute(
-            "UPDATE vibe_counting SET current_count = 0, last_user_id = NULL, "
-            "active = TRUE WHERE guild_id = %s",
+            "UPDATE vibe_counting SET active = TRUE WHERE guild_id = %s",
             (ctx.guild.id,),
         )
         channel = ctx.guild.get_channel(game["channel_id"])
@@ -192,25 +214,46 @@ class Counting(commands.Cog):
                 await self._celebrate(message, number)
             return
 
-        # Miscount (wrong number, or same member counting twice in a row).
+        # Miscount. Mark it, then decide the consequence.
         try:
             await message.add_reaction(MISS_EMOJI)
         except discord.HTTPException:
             pass
 
+        # Double-counting has its own warning system in both modes: first
+        # offence is a warning, a second offence resets the count to zero.
+        if message.author.id == game["last_user_id"]:
+            warned = await self.db.fetchone(
+                "SELECT 1 FROM vibe_counting_warnings "
+                "WHERE guild_id = %s AND user_id = %s",
+                (message.guild.id, message.author.id),
+            )
+            if warned is None:
+                await self.db.execute(
+                    "INSERT INTO vibe_counting_warnings (guild_id, user_id) "
+                    "VALUES (%s, %s)",
+                    (message.guild.id, message.author.id),
+                )
+                await message.channel.send(
+                    f"\N{WARNING SIGN} {message.author.mention} you counted twice "
+                    "in a row — that one doesn't count. Do it again and the "
+                    "count resets to zero!"
+                )
+            else:
+                await self._reset_count(message.guild.id)
+                await message.channel.send(
+                    f"{message.author.mention} counted twice in a row again "
+                    "after a warning — the count resets to zero. "
+                    "Start again at **1**!"
+                )
+            return
+
+        # Wrong number from a different member: hard mode resets, easy stands.
         if game["mode"] == "hard":
-            await self.db.execute(
-                "UPDATE vibe_counting SET current_count = 0, last_user_id = NULL "
-                "WHERE guild_id = %s",
-                (message.guild.id,),
-            )
-            reason = (
-                "counted twice in a row"
-                if number == expected
-                else f"posted **{number}** but the next number was **{expected}**"
-            )
+            await self._reset_count(message.guild.id)
             await message.channel.send(
-                f"{message.author.mention} {reason} — the count resets to zero. "
+                f"{message.author.mention} posted **{number}** but the next "
+                f"number was **{expected}** — the count resets to zero. "
                 "Start again at **1**!"
             )
 

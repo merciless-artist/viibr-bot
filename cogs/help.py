@@ -47,7 +47,8 @@ MEMBER_COMMANDS = (
 MEMBER_COUNTING = (
     "Join the counting game in the counting channel — post the next number, "
     "one per person. \N{HIGH VOLTAGE SIGN} means you got it, and big numbers "
-    "get a celebration."
+    "get a celebration. No counting twice in a row — you get one warning, "
+    "then the count resets to zero."
 )
 
 MEMBER_REPORT = (
