@@ -41,14 +41,16 @@ MEMBER_COMMANDS = (
     "`/resources` — server links: website, Twitch, Reddit, YouTube\n"
     "`/addmybd` — add your birthday to the server calendar\n"
     "`/removemybd` — take your birthday off the calendar\n"
-    "`/calendar` — see upcoming birthdays"
+    "`/calendar` — see upcoming birthdays\n"
+    "`/birthdaysong` — submit a birthday song you made to the rotation"
 )
 
 MEMBER_COUNTING = (
     "Join the counting game in the counting channel — post the next number, "
     "one per person. \N{HIGH VOLTAGE SIGN} means you got it, and big numbers "
     "get a celebration. No counting twice in a row — you get one warning, "
-    "then the count resets to zero."
+    "then the count resets to zero. And no chatting in there: messages "
+    "without the number get removed."
 )
 
 MEMBER_REPORT = (

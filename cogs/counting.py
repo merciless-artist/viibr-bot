@@ -15,10 +15,12 @@ admins can attach a custom image or gif to any specific number.
 from __future__ import annotations
 
 import logging
+import re
 
 import discord
 from discord.ext import commands
 
+import config
 from utils import embeds
 from utils.permissions import admin_only
 
@@ -28,6 +30,8 @@ VERIFY_EMOJI = "\N{HIGH VOLTAGE SIGN}"  # ⚡
 MISS_EMOJI = "\N{CROSS MARK}"  # ❌
 
 FIXED_MILESTONES = {100, 200, 500}
+
+NUMBER_RE = re.compile(r"-?\d+")
 
 
 def is_milestone(number: int) -> bool:
@@ -39,6 +43,9 @@ class Counting(commands.Cog):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        # Cache of {guild_id: counting_channel_id} so the message listener
+        # can skip non-counting channels without a database query.
+        self._counting_channels: dict[int, int] = {}
 
     @property
     def db(self):
@@ -82,6 +89,11 @@ class Counting(commands.Cog):
             """
         )
 
+        rows = await self.db.fetchall("SELECT guild_id, channel_id FROM vibe_counting")
+        self._counting_channels = {
+            row["guild_id"]: row["channel_id"] for row in rows
+        }
+
     async def _get_game(self, guild_id: int) -> dict | None:
         return await self.db.fetchone(
             "SELECT * FROM vibe_counting WHERE guild_id = %s", (guild_id,)
@@ -107,6 +119,7 @@ class Counting(commands.Cog):
             "mode = VALUES(mode)",
             (ctx.guild.id, ctx.channel.id, mode),
         )
+        self._counting_channels[ctx.guild.id] = ctx.channel.id
 
     # -- Admin commands --------------------------------------------------------
 
@@ -184,19 +197,37 @@ class Counting(commands.Cog):
         if message.author.bot or message.guild is None:
             return
 
-        content = message.content.strip()
-        if not content.lstrip("-").isdigit():
-            return  # not a number — normal chat is allowed
-
-        game = await self._get_game(message.guild.id)
-        if (
-            game is None
-            or not game["active"]
-            or game["channel_id"] != message.channel.id
-        ):
+        # Fast path: only the counting channel is ever enforced.
+        if self._counting_channels.get(message.guild.id) != message.channel.id:
             return
 
-        number = int(content)
+        # Leave room for admin commands like $startgame.
+        if message.content.startswith(config.PREFIX):
+            return
+
+        game = await self._get_game(message.guild.id)
+        if game is None or not game["active"]:
+            return
+
+        # No chatting: a message must contain a number to stay. Words are
+        # fine as long as the number is in there somewhere.
+        match = NUMBER_RE.search(message.content)
+        if match is None:
+            try:
+                await message.delete()
+            except discord.HTTPException:
+                pass
+            reminder = await message.channel.send(
+                f"{message.author.mention} no chatting in the counting channel — "
+                "your message needs the number in it."
+            )
+            try:
+                await reminder.delete(delay=6)
+            except discord.HTTPException:
+                pass
+            return
+
+        number = int(match.group(0))
         expected = game["current_count"] + 1
         correct = number == expected and message.author.id != game["last_user_id"]
 

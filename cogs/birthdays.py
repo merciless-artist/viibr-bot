@@ -8,10 +8,13 @@ plus a button members can press to send wishes.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import logging
+import re
 from pathlib import Path
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -31,17 +34,32 @@ ASSETS_DIR = Path(__file__).resolve().parent.parent / "ASSETS" / "birthday track
 CARD_IMAGE = ASSETS_DIR / "birthday-message.png"
 SONGS_DIR = ASSETS_DIR / "mp3s"
 
+# Community song submissions.
+MAX_SONG_SUBMISSIONS = 25
 
-def todays_song(today: datetime.date) -> Path | None:
-    """Pick the day's birthday song from the assets folder, rotating daily.
+# Downloaded community mp3s live outside the repo (server-local storage).
+COMMUNITY_SONGS_DIR = Path(__file__).resolve().parent.parent / "community_songs"
 
-    The folder is scanned at send time, so new songs added to the repository
-    join the rotation automatically.
-    """
-    songs = sorted(SONGS_DIR.glob("*.mp3"))
-    if not songs:
-        return None
-    return songs[today.timetuple().tm_yday % len(songs)]
+SUNO_PAGE_RE = re.compile(r"https?://(?:www\.)?suno\.com/(?:s|song)/\S+", re.I)
+SUNO_CDN_RE = re.compile(r"https?://cdn\d*\.suno(?:\.ai|\.com)/[A-Za-z0-9\-]+\.mp3")
+MAX_DOWNLOAD_BYTES = 24_000_000  # stay under Discord's attachment limit
+
+SONG_RULES = (
+    "**Want your song played on someone's birthday?** Submit a birthday song "
+    "you made and it joins the rotation!\n\n"
+    "**The rules:**\n"
+    "\N{BULLET} It has to be a birthday song you made yourself\n"
+    "\N{BULLET} Nothing gross, nothing R-rated\n"
+    "\N{BULLET} Keep it positive and fun for everyone\n"
+    "\N{BULLET} One song per member — submitting again replaces your old one\n\n"
+    "Staff may remove songs that break the rules."
+)
+
+SONGS_FULL_MESSAGE = (
+    "The birthday song list is full right now — thank you all for so much "
+    "birthday spirit! Spots open up when the rotation gets refreshed, so "
+    "check back later."
+)
 
 
 class BirthdayWishView(discord.ui.View):
@@ -66,6 +84,60 @@ class BirthdayWishView(discord.ui.View):
             )
             return
         await cog.record_wish(interaction)
+
+
+class SongSubmitModal(discord.ui.Modal, title="Submit your birthday song"):
+    """Modal collecting a song title and link from a member."""
+
+    song_title = discord.ui.TextInput(
+        label="Song title",
+        placeholder="My Amazing Birthday Banger",
+        max_length=100,
+    )
+    song_url = discord.ui.TextInput(
+        label="Song link",
+        placeholder="https://suno.com/s/... or a YouTube link",
+        max_length=400,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        cog = interaction.client.get_cog("Birthdays")
+        if cog is None:
+            await interaction.response.send_message(
+                "Birthdays are unavailable right now.", ephemeral=True
+            )
+            return
+        await cog.save_song_submission(
+            interaction, str(self.song_title), str(self.song_url)
+        )
+
+
+class SongMenuView(discord.ui.View):
+    """Menu view with the submit button, shown by /birthdaysong."""
+
+    def __init__(self) -> None:
+        super().__init__(timeout=300)
+
+    @discord.ui.button(
+        label="Submit a song",
+        style=discord.ButtonStyle.primary,
+        emoji="\N{MUSICAL NOTE}",
+    )
+    async def submit_song(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        cog = interaction.client.get_cog("Birthdays")
+        if cog is None:
+            await interaction.response.send_message(
+                "Birthdays are unavailable right now.", ephemeral=True
+            )
+            return
+        if await cog.submissions_full(interaction.guild_id, interaction.user.id):
+            await interaction.response.send_message(
+                SONGS_FULL_MESSAGE, ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(SongSubmitModal())
 
 
 class Birthdays(commands.Cog):
@@ -116,6 +188,20 @@ class Birthdays(commands.Cog):
                 user_id BIGINT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE KEY unique_wish (message_id, user_id)
+            )
+            """
+        )
+        await self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vibe_bday_submissions (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                guild_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                title VARCHAR(100) NOT NULL,
+                url VARCHAR(400) NOT NULL,
+                local_file VARCHAR(200) NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY unique_submitter (guild_id, user_id)
             )
             """
         )
@@ -199,6 +285,161 @@ class Birthdays(commands.Cog):
         embed = embeds.info("Upcoming birthdays", "\n".join(lines))
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    # -- Community song submissions ----------------------------------------------
+
+    @app_commands.command(
+        name="birthdaysong",
+        description="Submit a birthday song you made to the birthday rotation",
+    )
+    async def birthday_song(self, interaction: discord.Interaction) -> None:
+        row = await self.db.fetchone(
+            "SELECT COUNT(*) AS c FROM vibe_bday_submissions WHERE guild_id = %s",
+            (interaction.guild_id,),
+        )
+        used = row["c"] if row else 0
+        embed = embeds.info("Community Birthday Songs", SONG_RULES)
+        embed.set_footer(text=f"{used}/{MAX_SONG_SUBMISSIONS} rotation spots filled")
+        await interaction.response.send_message(
+            embed=embed, view=SongMenuView(), ephemeral=True
+        )
+
+    async def submissions_full(self, guild_id: int, user_id: int) -> bool:
+        """True if the list is at cap and this member isn't replacing their own."""
+        existing = await self.db.fetchone(
+            "SELECT 1 FROM vibe_bday_submissions "
+            "WHERE guild_id = %s AND user_id = %s",
+            (guild_id, user_id),
+        )
+        if existing:
+            return False  # replacing their own song is always allowed
+        row = await self.db.fetchone(
+            "SELECT COUNT(*) AS c FROM vibe_bday_submissions WHERE guild_id = %s",
+            (guild_id,),
+        )
+        return bool(row and row["c"] >= MAX_SONG_SUBMISSIONS)
+
+    async def save_song_submission(
+        self, interaction: discord.Interaction, title: str, url: str
+    ) -> None:
+        """Validate and store a member's song from the modal."""
+        url = url.strip()
+        if not url.startswith(("http://", "https://")):
+            await interaction.response.send_message(
+                "That link doesn't look right — it should start with https://",
+                ephemeral=True,
+            )
+            return
+        if await self.submissions_full(interaction.guild_id, interaction.user.id):
+            await interaction.response.send_message(SONGS_FULL_MESSAGE, ephemeral=True)
+            return
+
+        replacing = await self.db.fetchone(
+            "SELECT local_file FROM vibe_bday_submissions "
+            "WHERE guild_id = %s AND user_id = %s",
+            (interaction.guild_id, interaction.user.id),
+        )
+        await self.db.execute(
+            "INSERT INTO vibe_bday_submissions (guild_id, user_id, title, url) "
+            "VALUES (%s, %s, %s, %s) "
+            "ON DUPLICATE KEY UPDATE title = VALUES(title), url = VALUES(url), "
+            "local_file = NULL",
+            (interaction.guild_id, interaction.user.id, title.strip(), url),
+        )
+
+        # A replaced submission's old download is stale — remove it.
+        if replacing and replacing["local_file"]:
+            old = COMMUNITY_SONGS_DIR / replacing["local_file"]
+            old.unlink(missing_ok=True)
+
+        # Suno links: fetch the actual mp3 in the background so birthdays can
+        # attach the file instead of a link. Fails quietly to link-fallback.
+        if SUNO_PAGE_RE.match(url):
+            asyncio.create_task(
+                self._download_suno_mp3(interaction.guild_id, interaction.user.id, url)
+            )
+
+        text = (
+            f"Your submission has been updated to **{title.strip()}** — "
+            "it's in the birthday rotation!"
+            if replacing
+            else f"**{title.strip()}** is in the birthday rotation — "
+            "you'll get credit when it plays. \N{MUSICAL NOTE}"
+        )
+        await interaction.response.send_message(text, ephemeral=True)
+
+    async def _download_suno_mp3(self, guild_id: int, user_id: int, url: str) -> None:
+        """Fetch the mp3 behind a Suno song link and store it locally.
+
+        On success the submission row is updated with the file name; on any
+        failure the row keeps local_file NULL and birthdays fall back to
+        posting the link.
+        """
+        filename = f"{guild_id}_{user_id}.mp3"
+        dest = COMMUNITY_SONGS_DIR / filename
+        try:
+            timeout = aiohttp.ClientTimeout(total=60)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        return
+                    page = await resp.text()
+                match = SUNO_CDN_RE.search(page)
+                if match is None:
+                    log.info("No Suno CDN mp3 found on page for %s", url)
+                    return
+                async with session.get(match.group(0)) as resp:
+                    if resp.status != 200:
+                        return
+                    if int(resp.headers.get("Content-Length") or 0) > MAX_DOWNLOAD_BYTES:
+                        log.info("Suno mp3 too large to attach for %s", url)
+                        return
+                    data = await resp.read()
+            if len(data) > MAX_DOWNLOAD_BYTES:
+                return
+            COMMUNITY_SONGS_DIR.mkdir(exist_ok=True)
+            dest.write_bytes(data)
+            await self.db.execute(
+                "UPDATE vibe_bday_submissions SET local_file = %s "
+                "WHERE guild_id = %s AND user_id = %s",
+                (filename, guild_id, user_id),
+            )
+        except Exception:
+            log.exception("Failed to download Suno mp3 for %s", url)
+
+    @commands.command(name="bdsongs")
+    @admin_only()
+    async def list_bd_songs(self, ctx: commands.Context) -> None:
+        """List community song submissions with their ids. (Admin)"""
+        rows = await self.db.fetchall(
+            "SELECT id, user_id, title, url FROM vibe_bday_submissions "
+            "WHERE guild_id = %s ORDER BY id",
+            (ctx.guild.id,),
+        )
+        if not rows:
+            await ctx.send(embed=embeds.info("Community songs", "No submissions yet."))
+            return
+        lines = [
+            f"`#{row['id']}` [{row['title']}]({row['url']}) — <@{row['user_id']}>"
+            for row in rows
+        ]
+        embed = embeds.info(
+            f"Community songs ({len(rows)}/{MAX_SONG_SUBMISSIONS})", "\n".join(lines)
+        )
+        await ctx.send(embed=embed)
+
+    @commands.command(name="removebdsong")
+    @admin_only()
+    async def remove_bd_song(self, ctx: commands.Context, submission_id: int) -> None:
+        """Remove a community song by its id from $bdsongs. (Admin)"""
+        removed = await self.db.execute(
+            "DELETE FROM vibe_bday_submissions WHERE guild_id = %s AND id = %s",
+            (ctx.guild.id, submission_id),
+        )
+        if removed:
+            await ctx.send(embed=embeds.success(f"Removed submission #{submission_id}."))
+        else:
+            await ctx.send(embed=embeds.error(f"No submission #{submission_id} found."))
+
     # -- Admin command -----------------------------------------------------------
 
     @commands.command(name="bdaychannel")
@@ -276,8 +517,14 @@ class Birthdays(commands.Cog):
     async def _send_greeting(
         self, channel: discord.TextChannel, row: dict, today: datetime.date
     ) -> None:
-        """Send the premade card and the day's song for one birthday."""
+        """Send the premade card and the day's song for one birthday.
+
+        The song rotation is the local mp3 assets plus community submissions,
+        indexed by day of year. Local picks are attached as files; community
+        picks are posted as links with credit to the member who made them.
+        """
         who = f"<@{row['user_id']}>" if row["user_id"] else f"**{row['name']}**"
+        content = f"\N{BIRTHDAY CAKE} Happy Birthday {who}!"
 
         files = []
         if CARD_IMAGE.is_file():
@@ -285,13 +532,37 @@ class Birthdays(commands.Cog):
         else:
             log.warning("Birthday card image not found at %s", CARD_IMAGE)
 
-        song = todays_song(today)
-        if song is not None:
-            files.append(discord.File(song))
+        local_songs = sorted(SONGS_DIR.glob("*.mp3"))
+        submissions = await self.db.fetchall(
+            "SELECT user_id, title, url, local_file FROM vibe_bday_submissions "
+            "WHERE guild_id = %s ORDER BY id",
+            (channel.guild.id,),
+        )
+        pool_size = len(local_songs) + len(submissions)
+        if pool_size:
+            index = today.timetuple().tm_yday % pool_size
+            if index < len(local_songs):
+                files.append(discord.File(local_songs[index]))
+            else:
+                pick = submissions[index - len(local_songs)]
+                credit = (
+                    f"\nToday's birthday song: **{pick['title']}** — "
+                    f"written by <@{pick['user_id']}>"
+                )
+                downloaded = (
+                    COMMUNITY_SONGS_DIR / pick["local_file"]
+                    if pick["local_file"]
+                    else None
+                )
+                if downloaded is not None and downloaded.is_file():
+                    content += credit
+                    files.append(discord.File(downloaded))
+                else:
+                    content += f"{credit}\n{pick['url']}"
 
         try:
             await channel.send(
-                content=f"\N{BIRTHDAY CAKE} Happy Birthday {who}!",
+                content=content,
                 files=files,
                 view=BirthdayWishView(),
             )
