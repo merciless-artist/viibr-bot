@@ -236,8 +236,8 @@ class Counting(commands.Cog):
                 )
                 await message.channel.send(
                     f"\N{WARNING SIGN} {message.author.mention} you counted twice "
-                    "in a row — that one doesn't count. Do it again and the "
-                    "count resets to zero!"
+                    "in a row — that one doesn't count. **Don't do it again** "
+                    "or else the count resets to zero!"
                 )
             else:
                 await self._reset_count(message.guild.id)
