@@ -14,7 +14,7 @@ import discord
 from discord.ext import commands
 
 from utils import embeds
-from utils.permissions import admin_only, mod_only
+from utils.permissions import admin_only
 
 log = logging.getLogger("vibe.moderation")
 
@@ -111,7 +111,7 @@ class Moderation(commands.Cog):
         await ctx.send(embed=embeds.success(f"Deletion log set to {channel.mention}."))
 
     @commands.command(name="delete")
-    @mod_only()
+    @admin_only()
     async def bulk_delete(self, ctx: commands.Context, amount: int) -> None:
         """Delete the last <amount> messages in this channel (max 100)."""
         if amount < 1 or amount > PURGE_LIMIT:
