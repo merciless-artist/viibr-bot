@@ -20,6 +20,45 @@ log = logging.getLogger("vibe.moderation")
 
 PURGE_LIMIT = 100
 CONTENT_TRUNCATE = 800
+CONFIRM_TIMEOUT_SECONDS = 30
+
+
+class ConfirmDeleteView(discord.ui.View):
+    """Yes/Cancel confirmation shown before a bulk delete runs.
+
+    Only the member who invoked the command can press the buttons. The view
+    times out after a short window, after which the prompt is removed.
+    """
+
+    def __init__(self, invoker_id: int) -> None:
+        super().__init__(timeout=CONFIRM_TIMEOUT_SECONDS)
+        self.invoker_id = invoker_id
+        self.confirmed: bool | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.invoker_id:
+            await interaction.response.send_message(
+                "This confirmation belongs to whoever ran the command.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Yes, delete", style=discord.ButtonStyle.danger)
+    async def confirm(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        self.confirmed = True
+        await interaction.response.defer()
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        self.confirmed = False
+        await interaction.response.defer()
+        self.stop()
 
 
 class Moderation(commands.Cog):
@@ -79,6 +118,33 @@ class Moderation(commands.Cog):
             await ctx.send(
                 embed=embeds.error(f"Amount must be between 1 and {PURGE_LIMIT}.")
             )
+            return
+
+        # Ask before deleting — bulk deletes can't be undone.
+        view = ConfirmDeleteView(ctx.author.id)
+        prompt = await ctx.send(
+            embed=embeds.info(
+                "Confirm bulk delete",
+                f"Delete the last **{amount}** message(s) in {ctx.channel.mention}?",
+            ),
+            view=view,
+        )
+        await view.wait()
+        try:
+            await prompt.delete()
+        except discord.HTTPException:
+            pass
+
+        if not view.confirmed:
+            cancelled = await ctx.send(
+                embed=embeds.info(
+                    "Cancelled",
+                    "No messages were deleted."
+                    if view.confirmed is False
+                    else "Confirmation timed out — no messages were deleted.",
+                )
+            )
+            await cancelled.delete(delay=5)
             return
 
         # +1 so the command message itself is removed too. Ids are recorded in
