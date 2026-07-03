@@ -1,14 +1,11 @@
 """Help commands.
 
-`$help` / `$viibr` sends the staff command menu image to admins/mods; members
-who run it are pointed to the `/help` slash command. `/help` is the
+`$help` / `$viibr` sends the staff command menu (a code block) to admins/mods;
+members who run it are pointed to the `/help` slash command. `/help` is the
 member-facing overview and never lists admin commands.
 """
 
 from __future__ import annotations
-
-import logging
-from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -17,14 +14,43 @@ from discord.ext import commands
 from utils import embeds
 from utils.permissions import is_mod
 
-log = logging.getLogger("vibe.help")
-
 # Bot developer, tagged in the member help menu for problem reports.
 DEV_ID = 966507927756234823
 
-STAFF_MENU_IMAGE = (
-    Path(__file__).resolve().parent.parent / "ASSETS" / "StaffHelpMenu.png"
-)
+STAFF_MENU = """\
+Viibr Bot Staff Commands - Customized Utility Bot, Responds only to the listed commands.
+Prefix for staff is the dollar sign ▪ $
+Members help menu accessed with the command /help
+
+  General
+$help/$viibr (admin/mod) - this menu
+$delete <#> - (admin) bulk delete # amount of messages up to 100
+$setlog <channel ID> (admin) - sets deleted msgs accountability channel
+$sync – sync slash commands
+
+ Tickets Setup (admin)
+$ticketstaff @role - set role to be pinged
+$ticketcategory - set tickets category
+$ticketlog <channel ID> - logging channel for closed tickets
+$ticketpanel - post tickets button in this channel
+$ticketconfig - the current ticket setup
+$close (admin/mods) - close the ticket in the current channel
+
+  Counting (admin)
+$countinghard/$countingeasy - set counting channel with difficulty level (hard mode = wrong count resets to 0)
+$startgame - starts/restarts counting
+$milestone <number> <url> - set pic for counting milestones (optional)
+
+  Birthdays (admin)
+$bdaychannel <channelID> - set the channel for birthday announcements members can set their own birthdays in this channel as well with a slash command /addmybd
+$bdsongs – list community-submitted birthday songs with their ID numbers
+$removebdsong <ID> – remove a submitted song that breaks the rules
+
+  Resources (admin)
+$addresource [Name](url) - add link to the /resources list
+$deleteresource [Name] - remove this resource
+$replaceresource [Name](new url) - update a resource link
+"""
 
 MEMBER_ABOUT = (
     "Customized Utility bot for this server. Members can use these slash commands:"
@@ -72,19 +98,12 @@ class Help(commands.Cog):
 
     @commands.command(name="help", aliases=["viibr"])
     async def help_command(self, ctx: commands.Context) -> None:
-        """Send the staff menu image. Members are pointed to /help."""
+        """Send the staff menu. Members are pointed to /help."""
         if not (isinstance(ctx.author, discord.Member) and is_mod(ctx.author)):
             await ctx.send("That menu is for staff. Use `/help` to see your commands.")
             return
 
-        if STAFF_MENU_IMAGE.is_file():
-            await ctx.send(file=discord.File(STAFF_MENU_IMAGE))
-        else:
-            log.warning("Staff menu image missing at %s", STAFF_MENU_IMAGE)
-            await ctx.send(
-                "The staff menu image is missing from the deployment — "
-                "check ASSETS/StaffHelpMenu.png."
-            )
+        await ctx.send(f"```\n{STAFF_MENU}\n```")
 
     @app_commands.command(
         name="help", description="What Viibr can do and how to use it"
