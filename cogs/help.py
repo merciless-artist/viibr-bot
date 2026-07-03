@@ -1,11 +1,14 @@
 """Help commands.
 
-`$help` / `$amp` is the staff (admin/mod) menu; members who run it are pointed
-to the `/help` slash command. `/help` is the member-facing overview and never
-lists admin commands.
+`$help` / `$viibr` sends the staff command menu image to admins/mods; members
+who run it are pointed to the `/help` slash command. `/help` is the
+member-facing overview and never lists admin commands.
 """
 
 from __future__ import annotations
+
+import logging
+from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -14,51 +17,13 @@ from discord.ext import commands
 from utils import embeds
 from utils.permissions import is_mod
 
+log = logging.getLogger("vibe.help")
+
 # Bot developer, tagged in the member help menu for problem reports.
 DEV_ID = 966507927756234823
 
-ADMIN_ABOUT = "Customized Utility bot for this server. Responds only to the listed commands."
-
-ADMIN_GENERAL = (
-    "`$help` / `$viibr` — this menu\n"
-    "`$ping` — check that the bot is online and responding"
-)
-
-ADMIN_TICKETS = (
-    "*(admin & bot manager)*\n"
-    "`$ticketstaff @role` — set the staff role pinged in new tickets\n"
-    "`$ticketcategory <name>` — set the category tickets are created under\n"
-    "`$ticketlog #channel` — set where closed-ticket transcripts are posted\n"
-    "`$ticketconfig` — show the current ticket setup\n"
-    "`$ticketpanel` — post the Open Ticket button in the current channel\n\n"
-    "*(admin, bot manager and mods)*\n"
-    "`$close` — close the ticket in the current channel"
-)
-
-ADMIN_MODERATION = (
-    "*(admin, bot manager and mods)*\n"
-    "`$delete <n>` — bulk delete the last n messages in this channel (max 100)\n\n"
-    "*(admin & bot manager)*\n"
-    "`$setlog #channel` — set the deletion log channel"
-)
-
-ADMIN_COUNTING = (
-    "`$countinghard` — make this channel the counting channel (miscount resets)\n"
-    "`$countingeasy` — counting channel, relaxed (miscounts don't reset)\n"
-    "`$startgame` — start or restart the count\n"
-    "`$milestone <number> <url>` — custom image/gif for a milestone number"
-)
-
-ADMIN_BIRTHDAYS = (
-    "`$bdaychannel #channel` — where birthday announcements post\n"
-    "Members add themselves with /addmybd; the card image and songs come "
-    "from the repository's assets folder."
-)
-
-ADMIN_RESOURCES = (
-    "`$addresource [Name](url)` — add a link to /resources\n"
-    "`$deleteresource Name` — remove a link\n"
-    "`$replaceresource [Name](new-url)` — update a link"
+STAFF_MENU_IMAGE = (
+    Path(__file__).resolve().parent.parent / "ASSETS" / "StaffHelpMenu.png"
 )
 
 MEMBER_ABOUT = (
@@ -104,20 +69,19 @@ class Help(commands.Cog):
 
     @commands.command(name="help", aliases=["viibr"])
     async def help_command(self, ctx: commands.Context) -> None:
-        """Staff command menu. Members are pointed to /help."""
+        """Send the staff menu image. Members are pointed to /help."""
         if not (isinstance(ctx.author, discord.Member) and is_mod(ctx.author)):
             await ctx.send("That menu is for staff. Use `/help` to see your commands.")
             return
 
-        embed = embeds.info("Admin/Mod Commands Menu", ADMIN_ABOUT)
-        embed.add_field(name="General", value=ADMIN_GENERAL, inline=False)
-        embed.add_field(name="Tickets", value=ADMIN_TICKETS, inline=False)
-        embed.add_field(name="Moderation", value=ADMIN_MODERATION, inline=False)
-        embed.add_field(name="Counting", value=ADMIN_COUNTING, inline=False)
-        embed.add_field(name="Birthdays", value=ADMIN_BIRTHDAYS, inline=False)
-        embed.add_field(name="Resources", value=ADMIN_RESOURCES, inline=False)
-        embed.set_footer(text="Members: use /help for your version of this menu.")
-        await ctx.send(embed=embed)
+        if STAFF_MENU_IMAGE.is_file():
+            await ctx.send(file=discord.File(STAFF_MENU_IMAGE))
+        else:
+            log.warning("Staff menu image missing at %s", STAFF_MENU_IMAGE)
+            await ctx.send(
+                "The staff menu image is missing from the deployment — "
+                "check ASSETS/StaffHelpMenu.png."
+            )
 
     @app_commands.command(
         name="help", description="What Viibr can do and how to use it"
