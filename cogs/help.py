@@ -38,7 +38,7 @@ $close (admin/mods) - close the ticket in the current channel
 
   Counting (admin)
 $countinghard/$countingeasy - set counting channel with difficulty level (hard mode = wrong count resets to 0)
-$startgame - starts/restarts counting
+$startgame - starts/restarts counting (or $startgame <number> to pick up an existing count, e.g. $startgame 4127)
 $milestone <number> <url> - set pic for counting milestones (optional)
 
   Birthdays (admin)

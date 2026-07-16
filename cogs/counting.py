@@ -150,8 +150,13 @@ class Counting(commands.Cog):
 
     @commands.command(name="startgame")
     @admin_only()
-    async def start_game(self, ctx: commands.Context) -> None:
-        """Start the counting game (or restart it at zero)."""
+    async def start_game(self, ctx: commands.Context, start_at: int = 1) -> None:
+        """Start the counting game, optionally from a given number.
+
+        `$startgame` begins at 1. `$startgame 4127` sets the count so the next
+        number posted is 4127 — useful when carrying a count over from another
+        bot instead of starting the community over at zero.
+        """
         game = await self._get_game(ctx.guild.id)
         if game is None:
             await ctx.send(
@@ -162,15 +167,24 @@ class Counting(commands.Cog):
             )
             return
 
+        if start_at < 1:
+            await ctx.send(embed=embeds.error("The starting number must be at least 1."))
+            return
+
+        # Store the number BEFORE the next expected one, since the game adds
+        # one to find what it's waiting for.
         await self._reset_count(ctx.guild.id)
         await self.db.execute(
-            "UPDATE vibe_counting SET active = TRUE WHERE guild_id = %s",
-            (ctx.guild.id,),
+            "UPDATE vibe_counting SET active = TRUE, current_count = %s "
+            "WHERE guild_id = %s",
+            (start_at - 1, ctx.guild.id),
         )
         channel = ctx.guild.get_channel(game["channel_id"])
         target = channel.mention if channel else "the counting channel"
         await ctx.send(
-            embed=embeds.success(f"Counting game started in {target}. First number: **1**")
+            embed=embeds.success(
+                f"Counting game started in {target}. Next number: **{start_at:,}**"
+            )
         )
 
     @commands.command(name="milestone")
