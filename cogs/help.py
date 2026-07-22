@@ -73,7 +73,8 @@ MEMBER_COMMANDS = (
     "`/addmybd` — add your birthday to the server calendar\n"
     "`/removemybd` — take your birthday off the calendar\n"
     "`/calendar` — see upcoming birthdays\n"
-    "`/birthdaysong` — submit a birthday song you made to the rotation"
+    "`/birthdaysong` — submit a birthday song you made to the rotation\n"
+    "`/countboard` — counting game leaderboard and your rank"
 )
 
 MEMBER_COUNTING = (

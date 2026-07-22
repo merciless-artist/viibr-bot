@@ -10,6 +10,9 @@ Modes:
 
 Milestones (100, 200, 500, 1000, then every 1000) get a celebration message;
 admins can attach a custom image or gif to any specific number.
+
+Every correct count and every miss also feeds a per-member leaderboard,
+visible to everyone with /countboard.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ import logging
 import re
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 import config
@@ -28,6 +32,15 @@ log = logging.getLogger("vibe.counting")
 
 VERIFY_EMOJI = "\N{HIGH VOLTAGE SIGN}"  # ⚡
 MISS_EMOJI = "\N{CROSS MARK}"  # ❌
+
+# Leaderboard scoring. Correct counts build points, landing exactly on a
+# milestone pays a bonus, and misses cost enough to sting without wiping a
+# careful counter out (a miss undoes ten correct counts).
+POINTS_CORRECT = 1
+POINTS_MILESTONE_BONUS = 5
+POINTS_MISS = -10
+
+LEADERBOARD_SIZE = 10
 
 FIXED_MILESTONES = {100, 200, 500}
 
@@ -89,10 +102,37 @@ class Counting(commands.Cog):
             """
         )
 
+        await self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vibe_counting_stats (
+                guild_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                points INT NOT NULL DEFAULT 0,
+                correct INT NOT NULL DEFAULT 0,
+                misses INT NOT NULL DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, user_id)
+            )
+            """
+        )
+
         rows = await self.db.fetchall("SELECT guild_id, channel_id FROM vibe_counting")
         self._counting_channels = {
             row["guild_id"]: row["channel_id"] for row in rows
         }
+
+    async def _record_stat(
+        self, guild_id: int, user_id: int, *, points: int, correct: int = 0, miss: int = 0
+    ) -> None:
+        """Apply one scoring event to a member's leaderboard row."""
+        await self.db.execute(
+            "INSERT INTO vibe_counting_stats (guild_id, user_id, points, correct, misses) "
+            "VALUES (%s, %s, %s, %s, %s) "
+            "ON DUPLICATE KEY UPDATE points = points + VALUES(points), "
+            "correct = correct + VALUES(correct), misses = misses + VALUES(misses)",
+            (guild_id, user_id, points, correct, miss),
+        )
 
     async def _get_game(self, guild_id: int) -> dict | None:
         return await self.db.fetchone(
@@ -204,6 +244,57 @@ class Counting(commands.Cog):
             embed=embeds.success(f"Custom celebration set for **{number}**.")
         )
 
+    # -- Leaderboard -------------------------------------------------------------
+
+    @app_commands.command(
+        name="countboard", description="Counting game leaderboard — who's carrying and who's crashing"
+    )
+    async def countboard(self, interaction: discord.Interaction) -> None:
+        """Top counters by points, plus where the requester ranks."""
+        rows = await self.db.fetchall(
+            "SELECT user_id, points, correct, misses FROM vibe_counting_stats "
+            "WHERE guild_id = %s ORDER BY points DESC, correct DESC "
+            f"LIMIT {LEADERBOARD_SIZE}",
+            (interaction.guild_id,),
+        )
+        if not rows:
+            await interaction.response.send_message(
+                "Nobody is on the board yet — go count something!"
+            )
+            return
+
+        lines = [
+            f"**{position}.** <@{row['user_id']}> — **{row['points']:,}** pts "
+            f"({row['correct']:,} \N{HIGH VOLTAGE SIGN} / {row['misses']:,} \N{CROSS MARK})"
+            for position, row in enumerate(rows, start=1)
+        ]
+
+        # The requester's own standing, even when they're outside the top 10.
+        me = await self.db.fetchone(
+            "SELECT points, correct, misses FROM vibe_counting_stats "
+            "WHERE guild_id = %s AND user_id = %s",
+            (interaction.guild_id, interaction.user.id),
+        )
+        footer = "Correct +1 · milestone +5 bonus · miss -10"
+        if me is not None:
+            above = await self.db.fetchone(
+                "SELECT COUNT(*) AS c FROM vibe_counting_stats "
+                "WHERE guild_id = %s AND (points > %s "
+                "OR (points = %s AND correct > %s))",
+                (interaction.guild_id, me["points"], me["points"], me["correct"]),
+            )
+            rank = above["c"] + 1
+            footer = (
+                f"Your rank: #{rank} · {me['points']:,} pts "
+                f"({me['correct']:,} correct / {me['misses']:,} misses) · {footer}"
+            )
+
+        embed = embeds.info("Counting Leaderboard", "\n".join(lines))
+        embed.set_footer(text=footer)
+        await interaction.response.send_message(
+            embed=embed, allowed_mentions=discord.AllowedMentions.none()
+        )
+
     # -- Game listener ----------------------------------------------------------
 
     @commands.Cog.listener()
@@ -251,6 +342,12 @@ class Counting(commands.Cog):
                 "WHERE guild_id = %s",
                 (number, message.author.id, message.guild.id),
             )
+            points = POINTS_CORRECT
+            if is_milestone(number):
+                points += POINTS_MILESTONE_BONUS
+            await self._record_stat(
+                message.guild.id, message.author.id, points=points, correct=1
+            )
             try:
                 await message.add_reaction(VERIFY_EMOJI)
             except discord.HTTPException:
@@ -259,11 +356,14 @@ class Counting(commands.Cog):
                 await self._celebrate(message, number)
             return
 
-        # Miscount. Mark it, then decide the consequence.
+        # Miscount. Mark it, score it, then decide the consequence.
         try:
             await message.add_reaction(MISS_EMOJI)
         except discord.HTTPException:
             pass
+        await self._record_stat(
+            message.guild.id, message.author.id, points=POINTS_MISS, miss=1
+        )
 
         # Double-counting has its own warning system in both modes: first
         # offence is a warning, a second offence resets the count to zero.
