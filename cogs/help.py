@@ -40,7 +40,9 @@ $close (admin/mods) - close the ticket in the current channel
   Counting (admin)
 $countinghard/$countingeasy - set counting channel with difficulty level (hard mode = wrong count resets to 0)
 $startgame - starts/restarts counting (or $startgame <number> to pick up an existing count, e.g. $startgame 4127)
-$milestone <number> <url> - set pic for counting milestones (optional)
+$milestone <number> <url> - add a pic to a milestone's rotation (add several = random pick each time)
+$milestones - list milestone pics with their ID numbers
+$removemilestone <ID> - remove a milestone pic from the rotation
 
   Birthdays (admin)
 $bdaychannel <channelID> - set the channel for birthday announcements members can set their own birthdays in this channel as well with a slash command /addmybd
@@ -80,9 +82,10 @@ MEMBER_COMMANDS = (
 MEMBER_COUNTING = (
     "Join the counting game in the counting channel — post the next number, "
     "one per person. \N{HIGH VOLTAGE SIGN} means you got it, and big numbers "
-    "get a celebration. No counting twice in a row — you get one warning, "
-    "then the count resets to zero. And no chatting in there: messages "
-    "without the number get removed."
+    "get a celebration. Miss a number and you can hit **Double or Nothing** "
+    "for a chance to undo it — or double the damage. No counting twice in a "
+    "row — you get one warning, then the count resets to zero. And no chatting "
+    "in there: messages without the number get removed."
 )
 
 MEMBER_REPORT = (
