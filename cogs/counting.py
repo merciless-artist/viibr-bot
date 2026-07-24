@@ -172,6 +172,10 @@ class Counting(commands.Cog):
         # Cache of {guild_id: counting_channel_id} so the message listener
         # can skip non-counting channels without a database query.
         self._counting_channels: dict[int, int] = {}
+        # Cache of {guild_id: {numbers with a custom image}} so a normal count
+        # never hits the database — a number fires a celebration if it's a
+        # built-in milestone OR someone set a custom image ("prize") for it.
+        self._milestone_numbers: dict[int, set[int]] = {}
 
     @property
     def db(self):
@@ -255,6 +259,16 @@ class Counting(commands.Cog):
         self._counting_channels = {
             row["guild_id"]: row["channel_id"] for row in rows
         }
+
+        # Warm the milestone-number cache from whatever images already exist.
+        self._milestone_numbers = {}
+        milestone_rows = await self.db.fetchall(
+            "SELECT DISTINCT guild_id, number FROM vibe_counting_milestones"
+        )
+        for row in milestone_rows:
+            self._milestone_numbers.setdefault(row["guild_id"], set()).add(
+                row["number"]
+            )
 
     async def record_stat(
         self, guild_id: int, user_id: int, *, points: int, correct: int = 0, miss: int = 0
@@ -465,13 +479,19 @@ class Counting(commands.Cog):
             "VALUES (%s, %s, %s)",
             (ctx.guild.id, number, url),
         )
+        self._milestone_numbers.setdefault(ctx.guild.id, set()).add(number)
         count = await self.db.fetchone(
             "SELECT COUNT(*) AS c FROM vibe_counting_milestones "
             "WHERE guild_id = %s AND number = %s",
             (ctx.guild.id, number),
         )
         total = count["c"] if count else 1
-        extra = f" It now rotates between **{total}** images." if total > 1 else ""
+        if total > 1:
+            extra = f" It now rotates between **{total}** images."
+        elif is_milestone(number):
+            extra = ""
+        else:
+            extra = " This number will now fire a celebration when it's reached."
         await ctx.send(
             embed=embeds.success(f"Added a celebration image for **{number}**.{extra}")
         )
@@ -503,14 +523,28 @@ class Counting(commands.Cog):
     @admin_only()
     async def remove_milestone(self, ctx: commands.Context, milestone_id: int) -> None:
         """Remove one milestone image by its ID (see $milestones)."""
+        # Grab the number first so the cache can be pruned if it was the last
+        # image for that number.
+        target = await self.db.fetchone(
+            "SELECT number FROM vibe_counting_milestones WHERE guild_id = %s AND id = %s",
+            (ctx.guild.id, milestone_id),
+        )
         removed = await self.db.execute(
             "DELETE FROM vibe_counting_milestones WHERE guild_id = %s AND id = %s",
             (ctx.guild.id, milestone_id),
         )
-        if removed:
-            await ctx.send(embed=embeds.success(f"Removed milestone image `{milestone_id}`."))
-        else:
+        if not removed:
             await ctx.send(embed=embeds.error(f"No milestone image with ID `{milestone_id}`."))
+            return
+
+        number = target["number"]
+        still_there = await self.db.fetchone(
+            "SELECT 1 FROM vibe_counting_milestones WHERE guild_id = %s AND number = %s",
+            (ctx.guild.id, number),
+        )
+        if still_there is None:
+            self._milestone_numbers.get(ctx.guild.id, set()).discard(number)
+        await ctx.send(embed=embeds.success(f"Removed milestone image `{milestone_id}`."))
 
     # -- Leaderboard -------------------------------------------------------------
 
@@ -611,9 +645,11 @@ class Counting(commands.Cog):
                 "high_score = GREATEST(high_score, %s) WHERE guild_id = %s",
                 (number, message.author.id, number, message.guild.id),
             )
-            points = POINTS_CORRECT
-            if is_milestone(number):
-                points += POINTS_MILESTONE_BONUS
+            # A number celebrates if it's a built-in milestone OR an admin set
+            # a custom "prize" image for it. Either way it pays the bonus.
+            has_prize = number in self._milestone_numbers.get(message.guild.id, set())
+            celebrate = is_milestone(number) or has_prize
+            points = POINTS_CORRECT + (POINTS_MILESTONE_BONUS if celebrate else 0)
             await self.record_stat(
                 message.guild.id, message.author.id, points=points, correct=1
             )
@@ -621,7 +657,7 @@ class Counting(commands.Cog):
                 await message.add_reaction(VERIFY_EMOJI)
             except discord.HTTPException:
                 pass
-            if is_milestone(number):
+            if celebrate:
                 await self._celebrate(message, number)
             return
 

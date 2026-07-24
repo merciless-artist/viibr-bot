@@ -40,7 +40,7 @@ $close (admin/mods) - close the ticket in the current channel
   Counting (admin)
 $countinghard/$countingeasy - set counting channel with difficulty level (hard mode = wrong count resets to 0)
 $startgame - starts/restarts counting (or $startgame <number> to pick up an existing count, e.g. $startgame 4127)
-$milestone <number> <url> - add a pic to a milestone's rotation (add several = random pick each time)
+$milestone <number> <url> - add a pic/prize to any number (built-in milestones are 100/200/500/1000s; setting a pic on any other number makes it fire too; add several to one number = random pick each time)
 $milestones - list milestone pics with their ID numbers
 $removemilestone <ID> - remove a milestone pic from the rotation
 
