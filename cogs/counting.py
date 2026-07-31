@@ -48,7 +48,13 @@ LEADERBOARD_SIZE = 10
 # How long the "Double or Nothing" button stays live after a miss.
 GAMBLE_WINDOW_SECONDS = 25
 
+# Permanent milestones always celebrate when reached. Everything else an admin
+# attaches an image to is a "prize" number, which only fires some of the time
+# (see prize_chance) so frequently-reached numbers stay a surprise instead of
+# becoming scenery.
 FIXED_MILESTONES = {100, 200, 500}
+
+DEFAULT_PRIZE_CHANCE = 10  # percent, tunable per guild with $milestonechance
 
 NUMBER_RE = re.compile(r"-?\d+")
 
@@ -69,7 +75,12 @@ TRIVIA_FACTS = (
 )
 
 
-def is_milestone(number: int) -> bool:
+def is_permanent_milestone(number: int) -> bool:
+    """True for the built-in milestones, which always celebrate when reached.
+
+    Prize numbers (any number an admin attached an image to) also celebrate,
+    but only some of the time — see Counting._should_celebrate.
+    """
     return number in FIXED_MILESTONES or (number >= 1000 and number % 1000 == 0)
 
 
@@ -190,6 +201,7 @@ class Counting(commands.Cog):
                 mode VARCHAR(10) NOT NULL DEFAULT 'easy',
                 current_count INT NOT NULL DEFAULT 0,
                 high_score INT NOT NULL DEFAULT 0,
+                prize_chance INT NOT NULL DEFAULT 10,
                 last_user_id BIGINT NULL,
                 active BOOLEAN NOT NULL DEFAULT FALSE,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -243,6 +255,13 @@ class Counting(commands.Cog):
         try:
             await self.db.execute(
                 "ALTER TABLE vibe_counting ADD COLUMN high_score INT NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass  # column already exists
+        try:
+            await self.db.execute(
+                "ALTER TABLE vibe_counting ADD COLUMN prize_chance INT NOT NULL "
+                f"DEFAULT {DEFAULT_PRIZE_CHANCE}"
             )
         except Exception:
             pass  # column already exists
@@ -466,10 +485,12 @@ class Counting(commands.Cog):
     @commands.command(name="milestone")
     @admin_only()
     async def set_milestone(self, ctx: commands.Context, number: int, url: str) -> None:
-        """Add an image/gif to a milestone's rotation.
+        """Add an image/gif to a number's rotation.
 
-        Multiple images can share the same number — the bot picks one at random
-        each time that milestone is hit, so a repeat never looks the same twice.
+        Multiple images can share the same number — one is picked at random
+        each time it fires, so a repeat never looks the same twice. Numbers
+        outside the permanent milestones become "prize" numbers, which fire
+        only some of the time (see $milestonechance).
         """
         if number < 1:
             await ctx.send(embed=embeds.error("Milestone number must be positive."))
@@ -486,14 +507,53 @@ class Counting(commands.Cog):
             (ctx.guild.id, number),
         )
         total = count["c"] if count else 1
+
+        notes = []
         if total > 1:
-            extra = f" It now rotates between **{total}** images."
-        elif is_milestone(number):
-            extra = ""
+            notes.append(f"It now rotates between **{total}** images.")
+        if is_permanent_milestone(number):
+            notes.append("This is a permanent milestone, so it always fires.")
         else:
-            extra = " This number will now fire a celebration when it's reached."
+            chance = await self._prize_chance(ctx.guild.id)
+            notes.append(
+                f"This is a prize number — it fires **{chance}%** of the times "
+                "it's reached."
+            )
         await ctx.send(
-            embed=embeds.success(f"Added a celebration image for **{number}**.{extra}")
+            embed=embeds.success(
+                f"Added a celebration image for **{number:,}**. " + " ".join(notes)
+            )
+        )
+
+    @commands.command(name="milestonechance")
+    @admin_only()
+    async def set_prize_chance(self, ctx: commands.Context, percent: int) -> None:
+        """Set how often prize numbers fire, as a percentage (1-100).
+
+        Permanent milestones are unaffected — they always fire.
+        """
+        if not 1 <= percent <= 100:
+            await ctx.send(embed=embeds.error("Pick a percentage between 1 and 100."))
+            return
+        updated = await self.db.execute(
+            "UPDATE vibe_counting SET prize_chance = %s WHERE guild_id = %s",
+            (percent, ctx.guild.id),
+        )
+        if not updated:
+            await ctx.send(
+                embed=embeds.error(
+                    "No counting channel is set yet. Run `$countingeasy` or "
+                    "`$countinghard` first."
+                )
+            )
+            return
+        await ctx.send(
+            embed=embeds.success(
+                f"Prize numbers now fire **{percent}%** of the times they're "
+                "reached. Permanent milestones "
+                f"({', '.join(f'{n:,}' for n in sorted(FIXED_MILESTONES))}, and "
+                "every 1,000) still fire every time."
+            )
         )
 
     @commands.command(name="milestones")
@@ -513,10 +573,17 @@ class Counting(commands.Cog):
                 )
             )
             return
+        chance = await self._prize_chance(ctx.guild.id)
         lines = [
-            f"**{row['number']:,}** — ID `{row['id']}` — {row['media_url']}"
+            f"**{row['number']:,}** "
+            f"({'always' if is_permanent_milestone(row['number']) else f'{chance}%'}) "
+            f"— ID `{row['id']}` — {row['media_url']}"
             for row in rows
         ]
+        lines.append(
+            f"\nPermanent milestones always fire. Prize numbers fire {chance}% "
+            "of the time — change it with `$milestonechance <percent>`."
+        )
         await ctx.send(embed=embeds.info("Milestone images", "\n".join(lines)))
 
     @commands.command(name="removemilestone")
@@ -645,10 +712,14 @@ class Counting(commands.Cog):
                 "high_score = GREATEST(high_score, %s) WHERE guild_id = %s",
                 (number, message.author.id, number, message.guild.id),
             )
-            # A number celebrates if it's a built-in milestone OR an admin set
-            # a custom "prize" image for it. Either way it pays the bonus.
-            has_prize = number in self._milestone_numbers.get(message.guild.id, set())
-            celebrate = is_milestone(number) or has_prize
+            # Permanent milestones always celebrate; prize numbers only fire
+            # part of the time. The bonus follows the celebration, so an
+            # unfired prize scores as an ordinary count.
+            celebrate = self._should_celebrate(
+                message.guild.id,
+                number,
+                game.get("prize_chance", DEFAULT_PRIZE_CHANCE),
+            )
             points = POINTS_CORRECT + (POINTS_MILESTONE_BONUS if celebrate else 0)
             await self.record_stat(
                 message.guild.id, message.author.id, points=points, correct=1
@@ -718,6 +789,30 @@ class Counting(commands.Cog):
             )
 
         await self._offer_gamble(message, restore_count, restore_last_user)
+
+    async def _prize_chance(self, guild_id: int) -> int:
+        """The guild's prize-fire percentage, falling back to the default."""
+        row = await self.db.fetchone(
+            "SELECT prize_chance FROM vibe_counting WHERE guild_id = %s", (guild_id,)
+        )
+        if row is None or row.get("prize_chance") is None:
+            return DEFAULT_PRIZE_CHANCE
+        return row["prize_chance"]
+
+    def _should_celebrate(self, guild_id: int, number: int, prize_chance: int) -> bool:
+        """Decide whether reaching `number` fires a celebration.
+
+        Permanent milestones always fire. A prize number (any other number an
+        admin attached an image to) fires only `prize_chance` percent of the
+        time: because a miscount sends the count back to zero, low numbers get
+        passed over and over, and a prize that fired every single time would
+        stop being a surprise.
+        """
+        if is_permanent_milestone(number):
+            return True
+        if number not in self._milestone_numbers.get(guild_id, set()):
+            return False
+        return random.randint(1, 100) <= prize_chance
 
     async def _celebrate(self, message: discord.Message, number: int) -> None:
         """Post a celebration for a milestone, rotating through any custom media."""
