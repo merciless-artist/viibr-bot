@@ -14,7 +14,8 @@ rotates through them at random so a repeat milestone always feels fresh.
 
 Every correct count and every miss also feeds a per-member leaderboard,
 visible to everyone with /countboard. A miscount offers a one-shot "Double or
-Nothing" gamble, and every reset drops a random stat or trivia line.
+Nothing" gamble, sometimes draws a roast image, and every reset drops a random
+stat or trivia line.
 """
 
 from __future__ import annotations
@@ -55,6 +56,11 @@ GAMBLE_WINDOW_SECONDS = 25
 FIXED_MILESTONES = {100, 200, 500}
 
 DEFAULT_PRIZE_CHANCE = 10  # percent, tunable per guild with $milestonechance
+
+# Roast images are the mirror of prizes: a miscount sometimes gets an image
+# back. Images only, no bot-written text, and never every time — a roast that
+# fired on every miss would read as piling on rather than teasing.
+DEFAULT_ROAST_CHANCE = 25  # percent, tunable per guild with $roastchance
 
 NUMBER_RE = re.compile(r"-?\d+")
 
@@ -202,6 +208,7 @@ class Counting(commands.Cog):
                 current_count INT NOT NULL DEFAULT 0,
                 high_score INT NOT NULL DEFAULT 0,
                 prize_chance INT NOT NULL DEFAULT 10,
+                roast_chance INT NOT NULL DEFAULT 25,
                 last_user_id BIGINT NULL,
                 active BOOLEAN NOT NULL DEFAULT FALSE,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -234,6 +241,21 @@ class Counting(commands.Cog):
             """
         )
 
+        # Roast images fire on a miscount. Not tied to any number — one is
+        # picked at random from the whole pool.
+        await self.db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vibe_counting_roasts (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                guild_id BIGINT NOT NULL,
+                media_url VARCHAR(500) NOT NULL,
+                added_by BIGINT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_guild (guild_id)
+            )
+            """
+        )
+
         await self.db.execute(
             """
             CREATE TABLE IF NOT EXISTS vibe_counting_stats (
@@ -262,6 +284,13 @@ class Counting(commands.Cog):
             await self.db.execute(
                 "ALTER TABLE vibe_counting ADD COLUMN prize_chance INT NOT NULL "
                 f"DEFAULT {DEFAULT_PRIZE_CHANCE}"
+            )
+        except Exception:
+            pass  # column already exists
+        try:
+            await self.db.execute(
+                "ALTER TABLE vibe_counting ADD COLUMN roast_chance INT NOT NULL "
+                f"DEFAULT {DEFAULT_ROAST_CHANCE}"
             )
         except Exception:
             pass  # column already exists
@@ -525,6 +554,106 @@ class Counting(commands.Cog):
             )
         )
 
+    @commands.command(name="roast")
+    @admin_only()
+    async def add_roast(self, ctx: commands.Context, url: str) -> None:
+        """Add an image/gif to the roast pool for miscounts.
+
+        Roasts are images only — the bot adds no text of its own. One is picked
+        at random from the pool, and only some of the time (see $roastchance).
+        """
+        await self.db.execute(
+            "INSERT INTO vibe_counting_roasts (guild_id, media_url, added_by) "
+            "VALUES (%s, %s, %s)",
+            (ctx.guild.id, url, ctx.author.id),
+        )
+        row = await self.db.fetchone(
+            "SELECT COUNT(*) AS c FROM vibe_counting_roasts WHERE guild_id = %s",
+            (ctx.guild.id,),
+        )
+        total = row["c"] if row else 1
+        chance = await self._roast_chance(ctx.guild.id)
+        await ctx.send(
+            embed=embeds.success(
+                f"Added a roast image. The pool has **{total}** now, and a "
+                f"miscount gets one **{chance}%** of the time."
+            )
+        )
+
+    @commands.command(name="roasts")
+    @admin_only()
+    async def list_roasts(self, ctx: commands.Context) -> None:
+        """List the roast images with their ID numbers (for removal)."""
+        rows = await self.db.fetchall(
+            "SELECT id, media_url FROM vibe_counting_roasts WHERE guild_id = %s "
+            "ORDER BY id",
+            (ctx.guild.id,),
+        )
+        if not rows:
+            await ctx.send(
+                embed=embeds.info(
+                    "Roast images",
+                    "None yet. Add one with `$roast <image url>`.",
+                )
+            )
+            return
+        chance = await self._roast_chance(ctx.guild.id)
+        lines = [f"ID `{row['id']}` — {row['media_url']}" for row in rows]
+        lines.append(
+            f"\nA miscount gets a roast {chance}% of the time — change it with "
+            "`$roastchance <percent>`."
+        )
+        await ctx.send(embed=embeds.info("Roast images", "\n".join(lines)))
+
+    @commands.command(name="removeroast")
+    @admin_only()
+    async def remove_roast(self, ctx: commands.Context, roast_id: int) -> None:
+        """Remove one roast image by its ID (see $roasts)."""
+        removed = await self.db.execute(
+            "DELETE FROM vibe_counting_roasts WHERE guild_id = %s AND id = %s",
+            (ctx.guild.id, roast_id),
+        )
+        if removed:
+            await ctx.send(embed=embeds.success(f"Removed roast image `{roast_id}`."))
+        else:
+            await ctx.send(embed=embeds.error(f"No roast image with ID `{roast_id}`."))
+
+    @commands.command(name="roastchance")
+    @admin_only()
+    async def set_roast_chance(self, ctx: commands.Context, percent: int) -> None:
+        """Set how often a miscount gets a roast image, as a percentage (0-100).
+
+        Zero turns roasts off without deleting the images.
+        """
+        if not 0 <= percent <= 100:
+            await ctx.send(embed=embeds.error("Pick a percentage between 0 and 100."))
+            return
+        updated = await self.db.execute(
+            "UPDATE vibe_counting SET roast_chance = %s WHERE guild_id = %s",
+            (percent, ctx.guild.id),
+        )
+        if not updated:
+            await ctx.send(
+                embed=embeds.error(
+                    "No counting channel is set yet. Run `$countingeasy` or "
+                    "`$countinghard` first."
+                )
+            )
+            return
+        if percent == 0:
+            await ctx.send(
+                embed=embeds.success(
+                    "Roasts are off. The images are still saved — set a "
+                    "percentage above zero to switch them back on."
+                )
+            )
+            return
+        await ctx.send(
+            embed=embeds.success(
+                f"A miscount now gets a roast image **{percent}%** of the time."
+            )
+        )
+
     @commands.command(name="milestonechance")
     @admin_only()
     async def set_prize_chance(self, ctx: commands.Context, percent: int) -> None:
@@ -740,6 +869,7 @@ class Counting(commands.Cog):
         await self.record_stat(
             message.guild.id, message.author.id, points=POINTS_MISS, miss=1
         )
+        roast_chance = game.get("roast_chance", DEFAULT_ROAST_CHANCE)
 
         # Double-counting has its own warning system in both modes: first
         # offence is a warning, a second offence resets the count to zero.
@@ -769,6 +899,7 @@ class Counting(commands.Cog):
                     "after a warning — the count resets to zero. "
                     f"Start again at **1**!\n\n{flavor}"
                 )
+            await self._maybe_roast(message, roast_chance)
             return
 
         # Honest wrong number from a different member. Hard mode resets (and we
@@ -788,6 +919,7 @@ class Counting(commands.Cog):
                 f"Start again at **1**!\n\n{flavor}"
             )
 
+        await self._maybe_roast(message, roast_chance)
         await self._offer_gamble(message, restore_count, restore_last_user)
 
     async def _prize_chance(self, guild_id: int) -> int:
@@ -798,6 +930,36 @@ class Counting(commands.Cog):
         if row is None or row.get("prize_chance") is None:
             return DEFAULT_PRIZE_CHANCE
         return row["prize_chance"]
+
+    async def _roast_chance(self, guild_id: int) -> int:
+        """The guild's roast-fire percentage, falling back to the default."""
+        row = await self.db.fetchone(
+            "SELECT roast_chance FROM vibe_counting WHERE guild_id = %s", (guild_id,)
+        )
+        if row is None or row.get("roast_chance") is None:
+            return DEFAULT_ROAST_CHANCE
+        return row["roast_chance"]
+
+    async def _maybe_roast(self, message: discord.Message, roast_chance: int) -> None:
+        """Sometimes answer a miscount with a random roast image.
+
+        Images only — the bot writes nothing of its own here. The dice are
+        rolled before touching the database, so the usual miss costs no query.
+        """
+        if roast_chance <= 0 or random.randint(1, 100) > roast_chance:
+            return
+        rows = await self.db.fetchall(
+            "SELECT media_url FROM vibe_counting_roasts WHERE guild_id = %s",
+            (message.guild.id,),
+        )
+        if not rows:
+            return
+        embed = discord.Embed(color=embeds.RED)
+        embed.set_image(url=random.choice(rows)["media_url"])
+        try:
+            await message.channel.send(embed=embed)
+        except discord.HTTPException as exc:
+            log.warning("Could not post a roast image: %s", exc)
 
     def _should_celebrate(self, guild_id: int, number: int, prize_chance: int) -> bool:
         """Decide whether reaching `number` fires a celebration.

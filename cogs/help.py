@@ -46,6 +46,10 @@ $milestone <number> <url> - add a pic/prize to any number (add several to one nu
 $milestonechance <percent> - how often prize numbers fire (default 10%)
 $milestones - list milestone pics with their ID numbers
 $removemilestone <ID> - remove a milestone pic from the rotation
+$roast <image url> - add a roast pic, posted sometimes when someone miscounts (images only)
+$roasts - list roast pics with their ID numbers
+$removeroast <ID> - remove a roast pic
+$roastchance <percent> - how often a miscount gets roasted (default 25%, 0 turns it off)
 
   Birthdays (admin)
 $bdaychannel <channelID> - set the channel for birthday announcements members can set their own birthdays in this channel as well with a slash command /addmybd
