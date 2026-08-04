@@ -50,6 +50,9 @@ $roast <image url> - add a roast pic, posted sometimes when someone miscounts (i
 $roasts - list roast pics with their ID numbers
 $removeroast <ID> - remove a roast pic
 $roastchance <percent> - how often a miscount gets roasted (default 25%, 0 turns it off)
+$countblock <minutes> - how long deleting your count twice keeps you out (default 120)
+$countblocks - who has strikes or an active block
+$countunblock @member - lift a block and clear their strikes
 
   Birthdays (admin)
 $bdaychannel <channelID> - set the channel for birthday announcements members can set their own birthdays in this channel as well with a slash command /addmybd
@@ -92,7 +95,9 @@ MEMBER_COUNTING = (
     "get a celebration. Miss a number and you can hit **Double or Nothing** "
     "for a chance to undo it — or double the damage. No counting twice in a "
     "row — you get one warning, then the count resets to zero. And no chatting "
-    "in there: messages without the number get removed."
+    "in there: messages without the number get removed. Don't delete your own "
+    "number either — it leaves everyone guessing what comes next, so it costs "
+    "you a warning and then a spell out of the game."
 )
 
 MEMBER_REPORT = (
