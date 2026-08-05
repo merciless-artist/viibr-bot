@@ -2,8 +2,9 @@
 
 Deleting your own count is disruptive: the next counter reads the channel,
 sees the wrong last number, and takes the penalty for somebody else's
-deletion. The first deletion is a warning (posting twice and removing the
-duplicate is innocent), the second costs a timed block.
+deletion. Deleting is deliberate, so there is no warning step — every offence
+blocks and posts a shaming image, escalating from two hours to a day to
+permanent.
 
 The guards matter as much as the punishment — the bot's own housekeeping
 deletions, moderator cleanup, exempt staff, and a missing View Audit Log
@@ -33,7 +34,6 @@ ACTIVE_GAME = {
     "mode": "hard",
     "current_count": 40,
     "active": True,
-    "block_minutes": 120,
 }
 
 
@@ -48,6 +48,7 @@ def cog(monkeypatch) -> counting.Counting:
     instance.bot.db = MagicMock()
     instance.bot.db.fetchone = AsyncMock(return_value=ACTIVE_GAME)
     instance.bot.db.execute = AsyncMock(return_value=1)
+    instance.bot.db.fetchall = AsyncMock(return_value=[])  # no shaming images
     instance._counting_channels = {GUILD: CHANNEL}
 
     # By default: audit log readable, and nobody else deleted the message.
@@ -74,40 +75,98 @@ def make_message(
 
 
 # --------------------------------------------------------------------------- #
-# The strike ladder
+# The escalating ladder: two hours, then a day, then forever
 # --------------------------------------------------------------------------- #
-async def test_first_deletion_warns_without_blocking(cog):
+def block_write(cog):
+    """The INSERT that recorded the block: (sql, params)."""
+    for call in cog.bot.db.execute.await_args_list:
+        if "vibe_counting_blocks" in call.args[0]:
+            return call.args[0], call.args[1]
+    raise AssertionError("no block was written")
+
+
+async def test_first_offence_blocks_for_two_hours(cog):
     cog.bot.db.fetchone = AsyncMock(return_value=None)  # no strikes yet
     msg = make_message()
 
     await cog._register_deletion(msg)
 
-    sent = msg.channel.send.await_args.args[0]
-    assert "can't play fair" in sent
-    # A warning row, never a blocked_until.
-    written = cog.bot.db.execute.await_args.args[0]
-    assert "blocked_until" not in written
+    sql, params = block_write(cog)
+    assert params[2] == 1  # strikes
+    assert "FALSE" in sql  # not permanent
+    until = params[3]
+    minutes = (until - datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)).total_seconds() / 60
+    assert 118 < minutes < 121, f"blocked for {minutes:.0f} minutes, expected ~120"
 
 
-async def test_second_deletion_blocks(cog):
-    cog.bot.db.fetchone = AsyncMock(side_effect=[{"strikes": 1}, {"block_minutes": 120}])
+async def test_second_offence_blocks_for_a_day(cog):
+    cog.bot.db.fetchone = AsyncMock(return_value={"strikes": 1})
     msg = make_message()
 
     await cog._register_deletion(msg)
 
-    written = cog.bot.db.execute.await_args.args[0]
-    assert "blocked_until" in written
-    assert "out of the counting game" in msg.channel.send.await_args.args[0]
+    _, params = block_write(cog)
+    assert params[2] == 2
+    minutes = (params[3] - datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)).total_seconds() / 60
+    assert 1438 < minutes < 1441, f"blocked for {minutes:.0f} minutes, expected ~1440"
+
+
+async def test_third_offence_is_permanent(cog):
+    cog.bot.db.fetchone = AsyncMock(return_value={"strikes": 2})
+    msg = make_message()
+
+    await cog._register_deletion(msg)
+
+    sql, params = block_write(cog)
+    assert params[2] == 3
+    assert "permanent = TRUE" in sql
+    assert "permanently" in msg.channel.send.await_args_list[0].args[0]
+
+
+async def test_further_offences_stay_permanent(cog):
+    """The ladder must not run off the end of the list."""
+    cog.bot.db.fetchone = AsyncMock(return_value={"strikes": 9})
+    await cog._register_deletion(make_message())
+
+    sql, params = block_write(cog)
+    assert params[2] == 10
+    assert "permanent = TRUE" in sql
+
+
+async def test_every_offence_posts_a_shaming_image(cog):
+    cog.bot.db.fetchone = AsyncMock(return_value=None)
+    cog.bot.db.fetchall = AsyncMock(return_value=[{"media_url": "https://x.test/a.gif"}])
+    msg = make_message()
+
+    await cog._register_deletion(msg)
+
+    embeds_sent = [
+        c.kwargs["embed"] for c in msg.channel.send.await_args_list if "embed" in c.kwargs
+    ]
+    assert len(embeds_sent) == 1
+    assert embeds_sent[0].image.url == "https://x.test/a.gif"
+    assert embeds_sent[0].description is None  # images only, no bot text
+
+
+async def test_no_shaming_images_configured_is_fine(cog):
+    cog.bot.db.fetchone = AsyncMock(return_value=None)
+    cog.bot.db.fetchall = AsyncMock(return_value=[])
+    msg = make_message()
+
+    await cog._register_deletion(msg)  # must not raise
+
+    assert msg.channel.send.await_count == 1  # just the block notice
 
 
 async def test_block_message_only_pings_the_offender(cog):
-    cog.bot.db.fetchone = AsyncMock(side_effect=[{"strikes": 1}, {"block_minutes": 120}])
+    cog.bot.db.fetchone = AsyncMock(return_value={"strikes": 1})
     msg = make_message()
 
     await cog._register_deletion(msg)
 
-    allowed = msg.channel.send.await_args.kwargs["allowed_mentions"]
+    allowed = msg.channel.send.await_args_list[0].kwargs["allowed_mentions"]
     assert allowed.everyone is False
+    assert allowed.roles is False
     assert [o.id for o in allowed.users] == [MEMBER]
 
 
@@ -188,17 +247,26 @@ async def test_inactive_game_is_ignored(cog):
 # --------------------------------------------------------------------------- #
 # Serving a block
 # --------------------------------------------------------------------------- #
-async def test_blocked_lookup_returns_the_expiry(cog):
+async def test_timed_block_reports_its_expiry(cog):
     later = datetime.datetime(2030, 1, 1)
-    cog.bot.db.fetchone = AsyncMock(return_value={"blocked_until": later})
-    assert await cog._blocked_until(GUILD, MEMBER) == later
+    cog.bot.db.fetchone = AsyncMock(
+        return_value={"blocked_until": later, "permanent": 0}
+    )
+    assert await cog._block_state(GUILD, MEMBER) == (True, later)
 
 
-async def test_not_blocked_returns_none(cog):
+async def test_permanent_block_reports_no_expiry(cog):
+    cog.bot.db.fetchone = AsyncMock(
+        return_value={"blocked_until": None, "permanent": 1}
+    )
+    assert await cog._block_state(GUILD, MEMBER) == (True, None)
+
+
+async def test_unblocked_member_is_free(cog):
+    """The query filters expired blocks out, so no row means free to play."""
     cog.bot.db.fetchone = AsyncMock(return_value=None)
-    assert await cog._blocked_until(GUILD, MEMBER) is None
+    assert await cog._block_state(GUILD, MEMBER) == (False, None)
 
 
-async def test_block_minutes_falls_back_to_the_default(cog):
-    cog.bot.db.fetchone = AsyncMock(return_value=None)
-    assert await cog._block_minutes(GUILD) == counting.DEFAULT_BLOCK_MINUTES
+def test_the_ladder_matches_the_agreed_punishments():
+    assert counting.BLOCK_LADDER == (120, 1440, None)
