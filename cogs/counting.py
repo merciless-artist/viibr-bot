@@ -31,7 +31,7 @@ from discord.ext import commands
 
 import config
 from utils import embeds
-from utils.audit import audit_log_readable, find_message_deleter
+from utils.audit import UNKNOWN, find_message_deleter
 from utils.permissions import admin_only
 from utils.urls import is_direct_image_url
 
@@ -1280,16 +1280,17 @@ class Counting(commands.Cog):
         if game is None or not game["active"]:
             return
 
-        if not await audit_log_readable(message.guild):
+        deleter = await find_message_deleter(message, self._audit_cursor)
+        if deleter is UNKNOWN:
+            # Without audit log access every deletion looks like a self-delete,
+            # so stay quiet rather than punishing members at random.
             log.info(
-                "Skipping counting deletion check in %s — no View Audit Log "
-                "permission, so a moderator's deletion can't be told apart "
-                "from a member's.",
+                "Skipping counting deletion check in %s — can't read the audit "
+                "log, so a moderator's deletion is indistinguishable from a "
+                "member's.",
                 message.guild.name,
             )
             return
-
-        deleter = await find_message_deleter(message, self._audit_cursor)
         if deleter is not None:
             return  # a moderator removed it, not the author
 
