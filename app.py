@@ -87,6 +87,14 @@ class VibeBot(commands.Bot):
             intents=intents,
             help_command=None,
             tree_cls=VibeCommandTree,
+            # Nothing this bot sends should ever ping @everyone or a role by
+            # accident. Member-supplied text reaches messages in several
+            # features, and per-call allowed_mentions is easy to forget, so the
+            # safe setting is the default and the rare exception opts in
+            # (see utils.mentions.only_ping_role).
+            allowed_mentions=discord.AllowedMentions(
+                everyone=False, roles=False, users=True
+            ),
         )
         self.db = Database()
 

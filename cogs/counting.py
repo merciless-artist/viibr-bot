@@ -32,6 +32,7 @@ from discord.ext import commands
 import config
 from utils import embeds
 from utils.audit import UNKNOWN, find_message_deleter
+from utils.mentions import only_ping
 from utils.permissions import admin_only
 from utils.urls import is_direct_image_url
 
@@ -103,17 +104,6 @@ TRIVIA_FACTS = (
     "Fun fact: the number four is the only one whose letters equal its value.",
 )
 
-
-def only_ping(user_id: int) -> discord.AllowedMentions:
-    """Allow pinging exactly one member and nothing else.
-
-    ``AllowedMentions(users=[...])`` leaves everyone and roles at their
-    defaults, which permit those pings. Every call-site here addresses one
-    person, so the rest are turned off explicitly.
-    """
-    return discord.AllowedMentions(
-        everyone=False, roles=False, users=[discord.Object(id=user_id)]
-    )
 
 
 def is_permanent_milestone(number: int) -> bool:

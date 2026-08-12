@@ -22,6 +22,7 @@ from discord.ext import commands, tasks
 from pymysql.err import IntegrityError
 
 from utils import embeds
+from utils.mentions import only_ping
 from utils.permissions import admin_only
 from utils.urls import is_direct_image_url, is_http_url
 
@@ -462,7 +463,11 @@ class Birthdays(commands.Cog):
             "birthday rotation — they'll get credit when it plays. "
             "\N{MUSICAL NOTE}"
         )
-        await interaction.response.send_message(text)
+        # The title is whatever the member typed, so only they may be pinged
+        # by this announcement.
+        await interaction.response.send_message(
+            text, allowed_mentions=only_ping(interaction.user.id)
+        )
 
     async def _download_suno_mp3(self, guild_id: int, user_id: int, url: str) -> None:
         """Fetch the mp3 behind a Suno song link and store it locally.
@@ -801,6 +806,9 @@ class Birthdays(commands.Cog):
         """
         who = f"<@{row['user_id']}>" if row["user_id"] else f"**{row['name']}**"
         content = f"\N{BIRTHDAY CAKE} Happy Birthday {who}!"
+        # Only the birthday member, plus whoever wrote the song if one plays,
+        # may be pinged — a song title is member-supplied text.
+        pingable = [row["user_id"]] if row["user_id"] else []
 
         files = []
         embed = None
@@ -829,6 +837,7 @@ class Birthdays(commands.Cog):
                 files.append(discord.File(local_songs[index]))
             else:
                 pick = submissions[index - len(local_songs)]
+                pingable.append(pick["user_id"])
                 credit = (
                     f"\nToday's birthday song: **{pick['title']}** — "
                     f"written by <@{pick['user_id']}>"
@@ -845,7 +854,12 @@ class Birthdays(commands.Cog):
                     content += f"{credit}\n{pick['url']}"
 
         try:
-            await channel.send(content=content, embed=embed, files=files)
+            await channel.send(
+                content=content,
+                embed=embed,
+                files=files,
+                allowed_mentions=only_ping(*pingable),
+            )
         except discord.HTTPException as exc:
             await self.bot.report_error(
                 f"Failed to send a birthday greeting in #{channel}",

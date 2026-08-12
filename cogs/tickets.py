@@ -19,6 +19,7 @@ import discord
 from discord.ext import commands
 
 from utils import embeds
+from utils.mentions import only_ping_role
 from utils.permissions import admin_only, is_admin, is_mod
 
 log = logging.getLogger("vibe.tickets")
@@ -329,8 +330,13 @@ class Tickets(commands.Cog):
             "Describe what you need and staff will be with you soon.\n"
             "Press **Close Ticket** below when it's resolved.",
         )
+        # The bot disables role pings by default, so this one opts back in:
+        # staff genuinely need to be notified that a ticket opened.
         await channel.send(
-            content=staff_role.mention, embed=embed, view=TicketCloseView()
+            content=staff_role.mention,
+            embed=embed,
+            view=TicketCloseView(),
+            allowed_mentions=only_ping_role(staff_role),
         )
         await interaction.followup.send(
             f"Your ticket is open: {channel.mention}", ephemeral=True
