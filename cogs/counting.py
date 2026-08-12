@@ -20,6 +20,7 @@ stat or trivia line.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import logging
 import random
@@ -225,6 +226,9 @@ class Counting(commands.Cog):
         # Last audit entry seen per guild, for utils.audit. Separate from the
         # moderation cog's cursor: each reader tracks its own position.
         self._audit_cursor: dict[int, tuple[int, int]] = {}
+        # One lock per guild so two people counting at once are judged in
+        # order rather than both against the same stale count.
+        self._guild_locks: dict[int, asyncio.Lock] = {}
 
     @property
     def db(self):
@@ -682,7 +686,8 @@ class Counting(commands.Cog):
             f"\nA miscount gets a roast {chance}% of the time — change it with "
             "`$roastchance <percent>`."
         )
-        await ctx.send(embed=embeds.info("Roast images", "\n".join(lines)))
+        for page in embeds.paged("Roast images", lines):
+            await ctx.send(embed=page)
 
     @commands.command(name="removeroast")
     @admin_only()
@@ -782,7 +787,8 @@ class Counting(commands.Cog):
             )
             return
         lines = [f"ID `{row['id']}` — {row['media_url']}" for row in rows]
-        await ctx.send(embed=embeds.info("Shaming images", "\n".join(lines)))
+        for page in embeds.paged("Shaming images", lines):
+            await ctx.send(embed=page)
 
     @commands.command(name="removeshame")
     @admin_only()
@@ -850,7 +856,8 @@ class Counting(commands.Cog):
                 state = "block served"
             lines.append(f"**{name}** — {row['strikes']} strike(s), {state}")
         lines.append("\nClear someone with `$countunblock @member`.")
-        await ctx.send(embed=embeds.info("Counting blocks", "\n".join(lines)))
+        for page in embeds.paged("Counting blocks", lines):
+            await ctx.send(embed=page)
 
     @commands.command(name="milestonechance")
     @admin_only()
@@ -913,7 +920,8 @@ class Counting(commands.Cog):
             f"\nPermanent milestones always fire. Prize numbers fire {chance}% "
             "of the time — change it with `$milestonechance <percent>`."
         )
-        await ctx.send(embed=embeds.info("Milestone images", "\n".join(lines)))
+        for page in embeds.paged("Milestone images", lines):
+            await ctx.send(embed=page)
 
     @commands.command(name="removemilestone")
     @admin_only()
@@ -995,6 +1003,14 @@ class Counting(commands.Cog):
 
     # -- Game listener ----------------------------------------------------------
 
+    def _guild_lock(self, guild_id: int) -> asyncio.Lock:
+        """One lock per guild, so counts are judged strictly in order."""
+        lock = self._guild_locks.get(guild_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._guild_locks[guild_id] = lock
+        return lock
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or message.guild is None:
@@ -1008,6 +1024,18 @@ class Counting(commands.Cog):
         if message.content.startswith(config.PREFIX):
             return
 
+        # discord.py handles each message in its own task, so two people
+        # counting at nearly the same moment would both read the old count and
+        # the second would be judged against it — marked wrong, docked ten
+        # points, and in hard mode wiping a run that was actually correct. The
+        # lock makes read-decide-write atomic per guild. Nothing inside blocks
+        # for long: the sends are quick and the gamble's 25-second window is
+        # handled by the View after this returns.
+        async with self._guild_lock(message.guild.id):
+            await self._handle_count(message)
+
+    async def _handle_count(self, message: discord.Message) -> None:
+        """Judge one counting message. Callers must hold the guild lock."""
         game = await self._get_game(message.guild.id)
         if game is None or not game["active"]:
             return
